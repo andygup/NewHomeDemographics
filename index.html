@@ -1,0 +1,774 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html xmlns="http://www.w3.org/1999/html">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=7,IE=9" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="format-detection" content="telephone=yes">
+<title>Demographic Demo</title>
+<link href='http://serverapi.arcgisonline.com/jsapi/arcgis/2.8/js/dojo/dojox/mobile/themes/iPhone/iPhone.css'
+      rel='stylesheet'>
+<link href="http://serverapi.arcgisonline.com/jsapi/arcgis/2.8/js/dojo/dojox/mobile/themes/buttons.css"
+      rel="stylesheet">
+<style type="text/css">
+    html, body
+    {
+        height: 100%;
+        margin: 0px;
+        padding: 0px;
+        width: 100%;
+    }
+    #refreshButton{
+        position: absolute;
+        left: 10px;
+    }
+
+</style>
+<script type="text/javascript">
+    var djConfig = {
+        parseOnLoad: true
+    };
+</script>
+<script src="scripts/Event.js" type="text/javascript"></script>
+<script type="text/javascript" src="http://serverapi.arcgisonline.com/jsapi/arcgis/?v=2.8compact"></script>
+<script type="text/javascript">
+/**
+ * Version: 0.3
+ * Date: Sep 12, 2012
+ * Written by: Andy Gup (@agup)
+ * Requires: ArcGIS API for JavaScript, Dojo 1.6
+ * For information on the mapping API & its license (ArcGIS API for JavaScript) visit http://resources.arcgis.com
+ * Restrictions: Other than the ArcGIS API for JavaScript and Dojo all other source here is free and open.
+ */
+
+djConfig = dojo.config;
+dojo.require("esri.map");
+dojo.require("dojox.mobile.parser");
+dojo.require("dojox.charting.widget.Chart2D");
+dojo.require("dojox.charting.themes.PlotKit.blue");
+dojo.require("dojox.charting.widget.Legend");
+dojo.require("dijit.form.Slider");
+dojo.require("dijit.form.TextBox"); // this we only include to make the textinput look prettier
+dojo.require("dojox.mobile");
+dojo.require("esri.tasks.locator");
+dojo.require("esri.tasks.route");
+dojo.require("esri.tasks.query");
+dojo.require("dojo.DeferredList");
+dojo.requireIf(!dojo.isWebKit, "dojox.mobile.compat");
+
+var map, locator, currentGraphic, geoprocess, queryTask, queryTaskIncome;
+var geo, geoEnabled = false;
+var progressIndicator, watchProcess = null;
+var pieData, pieChart = null, chartViewVisible = false, orientationChanged;
+
+function init() {
+
+    //********************** Geolocation Support *************************
+
+    //Best practice - use a global boolean
+    //when detecting HTML5 feature support.
+    if(navigator && navigator.geolocation)
+    {
+        geoEnabled = true;
+    }
+
+    //********************** Set up mapping services *************************
+
+    map = new esri.Map("map");
+
+    var tiledMapServiceLayer = new esri.layers.ArcGISTiledMapServiceLayer("http://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer");
+    map.addLayer(tiledMapServiceLayer);
+
+    locator = new esri.tasks.Locator("http://sampleserver1.arcgisonline.com/ArcGIS/rest/services/Locators/ESRI_Geocode_USA/GeocodeServer");
+
+    geoprocess = new esri.tasks.Geoprocessor("http://sampleserver1.arcgisonline.com/ArcGIS/rest/services/Network/ESRI_DriveTime_US/GPServer/CreateDriveTimePolygons");
+    geoprocess.setOutputSpatialReference({wkid:102100});
+
+    queryTask = new esri.tasks.QueryTask("http://sampleserver1.arcgisonline.com/ArcGIS/rest/services/Demographics/ESRI_Census_USA/MapServer/1");
+    queryTaskIncome = new esri.tasks.QueryTask("http://server.arcgisonline.com/ArcGIS/rest/services/Demographics/USA_Median_Household_Income/MapServer/1");
+
+    esri.config.defaults.io.proxyUrl = "/proxy/arcgisproxy.ashx";
+    esri.config.defaults.io.alwaysUseProxy = false;
+
+    //********************** Misc. User Interface Initialization *************************
+
+    pieChart = new com.agup.PieChart("chart1","statsView").pieChart;
+
+    geo = new GeolocationResult()
+    //Fire off a function when special custom event completes.
+    geo.addListener("RESULT_COMPLETE",geoResultComplete);
+
+    progressIndicator = new com.agup.ProgressIndicator()
+    progressIndicator.startProgressIndicator("listSection");
+
+    var helper = new com.agup.MapHelper(/*typeof String View*/"mapView",/* esri.Map */map);
+
+    getHTML5Location()
+
+}
+
+function geoResultComplete(result){
+    var geoResult = result.target;
+    var pt = new esri.geometry.Point(geoResult.html5Lon, geoResult.html5Lat, new esri.SpatialReference({wkid: 4326}));
+    showLocation(geoResult,pt);
+    var distance = dijit.byId("distVal").srcNodeRef.children[0].children[1].textContent.split(" ");
+    var test = dojo.byId("listSectionMiles")
+    test.innerHTML = "Demographics within " + distance[0] + " miles";
+    var drawCircle = new com.agup.DrawCircle()
+    var polygon = drawCircle.create(/* Miles */distance[0], /* esri.geometry.Point */pt);
+
+    var query = new esri.tasks.Query();
+    query.returnGeometry = false;
+    query.spatialRelationship = esri.tasks.Query.SPATIAL_REL_CONTAINS;
+    query.outFields = ["*"];
+    query.geometry = polygon;
+    query.outSpatialReference = {"wkid":4326};
+
+    var graphic = new esri.Graphic(esri.geometry.geographicToWebMercator(pt));
+    var driveTimes = "5 10"; //sets 5 minute and 10 minute drive times
+    var features= [];
+    features.push(graphic);
+    var featureSet = new esri.tasks.FeatureSet();
+    featureSet.features = features;
+    var params = {"Input_Location":featureSet, "Drive_Times":driveTimes};
+
+    var qt = new dojo.Deferred();
+    var qti = new dojo.Deferred();
+    var gp = new dojo.Deferred();
+
+    //Execute all queries in parallel and asynchronously
+    qt = queryTask.execute(query,queryTaskComplete,queryTaskErrorHandler);
+    qti = queryTaskIncome.execute(query,queryTaskIncomeComplete,queryTaskErrorHandler);
+    gp = geoprocess.execute(params, getDriveTimePolys,geoprocessErrorHandler);
+
+    //Don't stop the progress indicator until all processes are complete
+    //Reference: http://dojotoolkit.org/documentation/tutorials/1.6/deferreds/
+    var defList = new dojo.DeferredList([gp,qt,qti]);
+    defList.then(function(result){
+        progressIndicator.stopProgressIndicator();
+    });
+}
+
+function queryTaskIncomeComplete(featureSet){
+    var fsLength = featureSet.features.length;
+    if(fsLength == 0)alert("No Demographics results found");
+    else{
+        var medianInc = [];
+        var hhic0_25 = 0;
+        var hhic25_50 = 0;
+        var hhic50_75 = 0;
+        var hhic75_100 = 0;
+        var hhic100_200 = 0;
+        var hhic200_500 = 0;
+        var hhic500_ = 0;
+        var totalPop = 0;
+        var feature = null;
+
+        for (var i=0; i < fsLength; i++ )
+        {
+            feature = featureSet.features[i];
+            if(feature.attributes.MEDHINC_CY != 0)medianInc.push(feature.attributes.MEDHINC_CY);
+            hhic0_25 = hhic0_25 + feature.attributes.HINC0_CY + feature.attributes.HINC10_CY + feature.attributes.HINC15_CY + feature.attributes.HINC20_CY;
+            hhic25_50 = hhic25_50 + feature.attributes.HINC25_CY + feature.attributes.HINC30_CY + feature.attributes.HINC35_CY +
+                    feature.attributes.HINC40_CY + feature.attributes.HINC45_CY;
+            hhic50_75 = hhic50_75 + feature.attributes.HINC50_CY + feature.attributes.HINC60_CY;
+            hhic75_100 = hhic75_100 + feature.attributes.HINC75_CY;
+            hhic100_200 = hhic100_200 + feature.attributes.HINC100_CY + feature.attributes.HINC125_CY + feature.attributes.HINC150_CY;
+            hhic200_500 = hhic200_500 + feature.attributes.HINC200_CY + feature.attributes.HINC250_CY;
+            hhic500_ = hhic500_ + feature.attributes.HINC500_CY;
+            totalPop = totalPop + hhic0_25 + hhic25_50 + hhic50_75 + hhic75_100 + hhic100_200 + hhic200_500 + hhic500_;
+        }
+
+        pieData = [
+            {"x":"1","y":hhic0_25,text:"0 - 25k"},
+            {"x":"2","y":hhic25_50,text:"25k - 50k"},
+            {"x":"3","y":hhic50_75,text:"50k - 75k"},
+            {"x":"4","y":hhic75_100,text:"75k - 100k"},
+            {"x":"5","y":hhic100_200,text:"100k - 200k"},
+            {"x":"6","y":hhic200_500,text:"200k - 500k"},
+            {"x":"7","y":hhic500_,text:"500k+"}
+        ];
+
+        pieChart.addSeries("Demographic",pieData);
+        pieChart.render();
+
+        //Check to see if browser is firefox which doesn't support .innerText
+        var test = dojo.byId("medianIncome");
+        if(typeof test.textContent != "undefined"){
+            //actually the median here is the cumulative median values for each block group.
+            dojo.byId("medianIncome").textContent = "Median Income: $" + calculateMedian(medianInc);
+            dojo.byId("zero_twentyfive").textContent = "Income $0 - $25k: " + hhic0_25;
+            dojo.byId("twentyfive_fifty").textContent = "Income $25k - $50k: " + hhic25_50;
+            dojo.byId("fifty_seventyfive").textContent = "Income $50k - $75k: " + hhic50_75;
+            dojo.byId("seventyfive_onehundred").textContent = "Income $75k - $100k: " + hhic75_100;
+            dojo.byId("onehundred_twohundred").textContent = "Income $100k - $200k: " + hhic100_200;
+            dojo.byId("twohundred_fivehundred").textContent = "Income $200k - $500k: " + hhic200_500;
+            dojo.byId("fivehundredplus").textContent = "Income $500K+: " + hhic500_;
+        }
+        else{
+            //actually the median here is the cumulative median values for each block group.
+            dojo.byId("medianIncome").innerText = "Median Income: $" + calculateMedian(medianInc);
+            dojo.byId("zero_twentyfive").innerText = "Income $0 - $25k: " + hhic0_25;
+            dojo.byId("twentyfive_fifty").innerText = "Income $25k - $50k: " + hhic25_50;
+            dojo.byId("fifty_seventyfive").innerText = "Income $50k - $75k: " + hhic50_75;
+            dojo.byId("seventyfive_onehundred").innerText = "Income $75k - $100k: " + hhic75_100;
+            dojo.byId("onehundred_twohundred").innerText = "Income $100k - $200k: " + hhic100_200;
+            dojo.byId("twohundred_fivehundred").innerText = "Income $200k - $500k: " + hhic200_500;
+            dojo.byId("fivehundredplus").innerText = "Income $500K+: " + hhic500_;
+        }
+    }
+}
+
+/**
+ * Calculates the median value of an array
+ * @param array Input is an array of numbers
+ * @return median typeof Number
+ */
+function calculateMedian(values) {
+
+    values.sort( function(a,b) {return a - b;} );
+
+    var half = Math.floor(values.length/2);
+
+    if(values.length % 2){
+        return values[half];
+    }
+    else{
+        return (values[half-1] + values[half]) / 2.0;
+    }
+}
+
+function queryTaskComplete(featureSet){
+    var fsLength = featureSet.features.length;
+    if(fsLength == 0)dojo.byId("population").innerText = "Population: No results found!";
+    else{
+        var population = 0;
+        var medianAgeM = 0;
+        var medianAgeF = 0;
+        var hseUnits = 0;
+        var vacant = 0;
+        var renterOCC = 0; //renter occupied
+        var ownerOCC= 0;  //owner occupied
+        var feature = null;
+
+        for (var i=0; i < fsLength; i++ )
+        {
+            feature = featureSet.features[i];
+            population = population + feature.attributes.POP2007;
+            medianAgeM = medianAgeM + feature.attributes.MED_AGE_M;
+            medianAgeF = medianAgeM + feature.attributes.MED_AGE_F;
+            vacant = vacant + feature.attributes.VACANT;
+            hseUnits = hseUnits + feature.attributes.HSE_UNITS; //household units
+            renterOCC = renterOCC + feature.attributes.RENTER_OCC; //count of renter occupied households
+            ownerOCC = ownerOCC + feature.attributes.OWNER_OCC; //count of owner occupied households
+        }
+
+        //Check to see if browser is firefox which doesn't support .innerText
+        var test = dojo.byId("medianIncome");
+        if(typeof test.textContent != "undefined"){
+            dojo.byId("population").textContent = "Population: " + population;
+            dojo.byId("medianAgeMale").textContent = "Median Age Male: " + (medianAgeM/fsLength).toFixed(0);
+            dojo.byId("medianAgeFemale").textContent = "Median Age Female: " + (medianAgeF/fsLength).toFixed(0);
+            dojo.byId("vacant").textContent = "Vacant Households: " + vacant;
+            dojo.byId("households").textContent = "Total Households: " + hseUnits;
+            dojo.byId("renter").textContent = "Renter Occupied Households: " + renterOCC;
+            dojo.byId("owner").textContent = "Owner Occupied Households: " + ownerOCC;
+            dojo.byId("renterOwner").textContent = "Renter household ratio: " + (renterOCC / hseUnits).toFixed(2);
+        }
+        else{
+            dojo.byId("population").innerText = "Population: " + population;
+            dojo.byId("medianAgeMale").innerText = "Median Age Male: " + (medianAgeM/fsLength).toFixed(0);
+            dojo.byId("medianAgeFemale").innerText = "Median Age Female: " + (medianAgeF/fsLength).toFixed(0);
+            dojo.byId("vacant").innerText = "Vacant Households: " + vacant;
+            dojo.byId("households").innerText = "Total Households: " + hseUnits;
+            dojo.byId("renter").innerText = "Renter Occupied Households: " + renterOCC;
+            dojo.byId("owner").innerText = "Owner Occupied Households: " + ownerOCC;
+            dojo.byId("renterOwner").innerText = "Renter household ratio: " + (renterOCC / hseUnits).toFixed(2);
+        }
+    }
+}
+
+function queryTaskErrorHandler(event){
+    console.dir("queryTaskErrorHandler: " + event);
+    progressIndicator.stopProgressIndicator();
+}
+
+/**
+ * Best practice is to handle geoprocessor errors gracefully
+ */
+function geoprocessErrorHandler(event){
+    console.dir("geoprocessErrorHandler: " + event);
+    progressIndicator.stopProgressIndicator();
+}
+
+/**
+ * This defaults to a timeout of 15 seconds.
+ * @param showProgress OPTIONAL. The id of the html element to associate with a progressIndicator
+ * @param timeOut OPTIONAL. The timeout value for the HTML5 navigator to attempt to establish a location.
+ */
+function getHTML5Location(/*String*/showProgress,/*Number*/timeOut) {
+
+    if(typeof timeOut == 'undefined')timeOut = 15000;
+
+    if(typeof showProgress != 'undefined'){
+        progressIndicator.startProgressIndicator(showProgress);
+        var time = setTimeout(function(){
+            progressIndicator.stopProgressIndicator();
+        },4000)
+    }
+
+    if (geoEnabled) {
+        dojo.style("refreshButton","background","blue");
+        if(watchProcess != null)navigator.geolocation.clearWatch(watchProcess);
+        //Just use a one-time location shot
+        watchProcess = navigator.geolocation.getCurrentPosition(function (position) {
+            geo.setResult(position);
+        },html5Error,{timeout:timeOut});
+
+    }
+    else {
+        dojo.byId("address").innerText = "Your browser does not have location functionality";
+    }
+}
+
+function html5Error(error) {
+    dojo.byId("address").innerText = "Unable to find location. " + error.message;
+    alert("Unable to find location. " + error.message);
+    progressIndicator.stopProgressIndicator();
+}
+
+/**
+ * Class for handling geolocation results.
+ * @return RESULT_COMPLETE When navigator object returns a value this event fires.
+ */
+function GeolocationResult() {
+    "use strict";
+    EventTarget.call(this); //call the super-class constructor of EventTarget
+    this.setResult = function(position){
+
+        this.html5Lat = position.coords.latitude; //Get latitude
+        this.html5Lon = position.coords.longitude; //Get longitude
+        this.html5TimeStamp = position.timestamp; //Get timestamp
+        this.html5Accuracy = position.coords.accuracy; 	//Get accuracy in meters
+
+        //dojo.byId("address").innerHTML = position.coords.latitude + ", " +  position.coords.longitude;
+
+        //Fire off event indicating this process is complete
+        this.RESULT_COMPLETE();
+    }
+}
+
+//Special custom event to let the user interface know when certain processes complete.
+GeolocationResult.prototype = new EventTarget();
+GeolocationResult.prototype.constructor = GeolocationResult;
+GeolocationResult.prototype.RESULT_COMPLETE = function(){
+    this.fire("RESULT_COMPLETE");
+}
+
+function showLocation(/*GeolocationResult*/geo, /*esri.geometry.Point*/ pt) {
+
+    locator.locationToAddress(pt, 1000, function (candidate) {
+        if (candidate.address) {
+            var address = candidate.address.Address + "<br/> " + candidate.address.City + ", " + candidate.address.State + " " + candidate.address.Zip;
+            dojo.byId('address').innerHTML = address;
+            var pt = esri.geometry.geographicToWebMercator(candidate.location);
+            dojo.byId('accuracy').innerHTML = "Location accurate within " + geo.html5Accuracy + " meters <br /> Last Updated: " + new Date(geo.html5TimeStamp).toLocaleString();
+
+            //currentLocation = candidate.location;
+            //update the current location icon
+            if (!currentGraphic) {
+                var symbol = new esri.symbol.PictureMarkerSymbol('images/pushpin2.png',80,80);
+                currentGraphic = new esri.Graphic(pt, symbol);
+                map.graphics.add(currentGraphic);
+                map.centerAndZoom(pt, 15);
+            } else {
+                currentGraphic.setGeometry(pt);
+            }
+
+            //clearProgress();
+        }
+    }, function (error) {
+        dojo.byId('address').innerHTML = 'Unable to determine address';
+        clearProgress();
+    });
+}
+
+function getDriveTimePolys(results, messages){
+    var features = results[0].value.features;
+
+    if(features[0])
+    {
+        var polySymbolRed = new esri.symbol.SimpleFillSymbol();
+        polySymbolRed.setOutline(new esri.symbol.SimpleLineSymbol(esri.symbol.SimpleLineSymbol.STYLE_SOLID, new dojo.Color([0,0,0,0.5]), 1));
+        polySymbolRed.setColor(new dojo.Color([255,0,0,0.3]));
+        features[0].setSymbol(polySymbolRed);
+        map.graphics.add(features[0])
+    }
+
+    if(features[1])
+    {
+        var polySymbolGreen = new esri.symbol.SimpleFillSymbol();
+        polySymbolGreen.setOutline(new esri.symbol.SimpleLineSymbol(esri.symbol.SimpleLineSymbol.STYLE_SOLID, new dojo.Color([0,0,0,0.5]), 1));
+        polySymbolGreen.setColor(new dojo.Color([0,255,0,0.3]));
+        features[1].setSymbol(polySymbolGreen);
+        map.graphics.add(features[1]);
+    }
+
+    var polygon = new esri.geometry.Polygon(new esri.SpatialReference({wkid:102100}));
+    polygon.addRing(features[0].geometry.rings[0])
+    var z = polygon.getExtent();
+    map.setExtent(z);
+}
+
+function updateDistance(e) {
+    dojo.style("refreshButton","background","red");
+    var ul = dojo.byId("searchDistList");
+    dojo.forEach(ul.childNodes, function (node) {
+        if (!(node.nodeType != 1 || node.tagName != "LI")) {
+            var w = dijit.byNode(node);
+            if (node === e) {
+                dojo.removeClass(w.btnNode, "mblCheckOffButton");
+                dojo.addClass(w.btnNode, "mblCheckOnButton");
+                dijit.byId("distVal").srcNodeRef.children[0].children[1].textContent = e.children[0].children[0].textContent;
+            } else {
+                dojo.removeClass(w.btnNode, "mblCheckOnButton");
+                dojo.addClass(w.btnNode, "mblCheckOffButton");
+            }
+        }
+    });
+}
+
+/**
+ * MapHelper Class
+ * Listens for both View transitions and orientation changes and then
+ * adjusts the Map size and position.
+ * @param mapView the dojox.mobile.View where the map resides
+ * @param map the esri.Map Object
+ */
+dojo.declare("com.agup.MapHelper",null,{
+    map:null,
+    mapView:null,
+    orientationChanged:null,
+    constructor:function(/*Object*/mapView,/*Object*/map){
+        this.mapView = dijit.byId(mapView);
+        this.map = map;
+        this.map.isVisible = false;
+        this.orientationChanged = false;
+
+        if(this.map)this._setTransitionListener(this.mapView,this.map,this.orientationchanged);
+        if(this.map)this._setOrientationListener(this.map,this.orientationChanged);
+    },
+    _setTransitionListener:function(mapView,map,orientationChanged){
+        dojo.connect(mapView, "onAfterTransitionIn", null,
+            dojo.hitch(this,function(){
+                map.isVisible = true; //alert("Map " + this.orientationChanged);
+                if(map && this.orientationChanged == false){
+                    var time = setTimeout(function(){
+                        map.reposition();
+                        map.resize();
+                    },700);
+                }
+            })
+        );
+
+        dojo.connect(mapView, "onAfterTransitionOut",null,
+            function(){
+                map.isVisible = false;
+            }
+        );
+    },
+    _setOrientationListener:function(map,orientationChanged){
+        var supportsOrientationChange = "onorientationchange" in window,
+            orientationEvent = supportsOrientationChange ? "orientationchange" : "resize";
+
+        window.addEventListener(orientationEvent,
+            dojo.hitch(this,function(){
+                if(map && map.isVisible){
+                    map.reposition();
+                    map.resize();
+                    this.orientationChanged = true;
+                }
+                if(map && map.isVisible == false){
+                    this.orientationChanged = false;
+                }
+            }), false);
+}
+})
+
+/**
+ * PieChart Class - creates a piechart and a bindable listener to resize the chart
+ * after an orientation event. Automatically assigns a new public property to pieChart called isVisible.
+ *
+ * NOTE: On Android, when using the onorientationchange event, the width property of an element
+ * immediately returns the current width. Since there is no reliable to determine when
+ * the onorientationchange event is complete and your HTML element has finished redrawing
+ * the hack that I suggest is using a timer to delay when you retrieve the width property.
+ *
+ * @param chartDiv this is the id of the DIV that contains the chart
+ * @param chartView the id of the dojox.mobile.View
+ */
+dojo.declare("com.agup.PieChart",null,{
+    pieChart:null,
+    orientationChanged:null,
+    constructor:function(/* String */chartDiv,/* String */chartView){
+        this.pieChart = this._createChart(chartDiv);
+        this.orientationChanged = false;
+        if(chartView)this._setTransitionListener(chartView);
+        if(chartView)this._setOrientationListener();
+    },
+    _createChart:function(chartDiv){
+        //create the chart
+        //Had problems with using just HTML markup, so creating it here and piping to DIV
+        var pieChart = new dojox.charting.Chart2D(chartDiv);
+        //set the theme
+        pieChart.setTheme(dojox.charting.themes.PlotKit.blue);
+        //add plot
+        pieChart.addPlot("default", {
+            type: "Pie",
+            radius: 120,
+            fontColor: "black",
+            labelOffset: "-20"
+        });
+
+        pieChart.isVisible = false; //NOTE: this is a new public property that we inject
+
+        return pieChart;
+    },
+    _setTransitionListener:function(/* DIV of dojox.mobile.View where chart resides - typeof String  */view){
+        var test = dijit.byId(view);
+        var pieChart = this.pieChart;
+        dojo.connect(test, "onAfterTransitionIn",null,
+                dojo.hitch(this,function(){
+                    pieChart.isVisible = true;
+                    if(pieChart != null && this.orientationChanged == true)
+					var time = setTimeout(function(){pieChart.resize()},700);
+                })
+        );
+
+        dojo.connect(test, "onAfterTransitionOut",null,
+                dojo.hitch(this,function(){
+                    pieChart.isVisible = false;
+                    this.orientationChanged = false;
+                })
+        );
+    },
+    _setOrientationListener:function(){
+        var supportsOrientationChange = "onorientationchange" in window,
+                orientationEvent = supportsOrientationChange ? "orientationchange" : "resize";
+
+        window.addEventListener(orientationEvent,
+                dojo.hitch(this,function(){
+                    var pieChart = this.pieChart;
+                    var orientationChanged = this.orientationChanged;
+                    if(pieChart != null && pieChart.isVisible == false){
+                        orientationChanged = true;
+                    }
+                    if(pieChart != null && pieChart.isVisible == true){
+                        orientationChanged = false;
+                        var time = setTimeout(function(){pieChart.resize()},700);
+                    }
+					this.orientationChanged = orientationChanged;
+                }), false);
+    }
+})
+
+/**
+ * ProgressIndicator Class used for starting and stopping the progress indicator
+ */
+dojo.declare("com.agup.ProgressIndicator",null,{
+    progressIndicator:null,
+    running:false,
+    constructor: function(){
+        this.progressIndicator = dojox.mobile.ProgressIndicator.getInstance();
+    },
+    startProgressIndicator:function(nodeId){
+        var container = dojo.byId(nodeId);
+        //container.innerHTML = "";
+        container.appendChild(this.progressIndicator.domNode);
+        this.running = true;
+        this.progressIndicator.start();
+
+    },
+    stopProgressIndicator:function(){
+        this.progressIndicator.stop();
+        this.running = false;
+    },
+    getStatus:function(){
+        return this.running;
+    }
+})
+
+/**
+ * DrawCircle Class provides a circle geometry given a particular radius
+ * We are using this geometry as input into a database query.
+ * NOTE: Only works with Web Mercator mapping projection
+ */
+dojo.declare("com.agup.DrawCircle",null, {
+    radius:null,
+    point:null,
+    /**
+     * DrawCircle Class provides a circle geometry given a particular radius
+     * We are using this geometry as input into a database query.
+     * NOTE: Only works with Web Mercator mapping projection
+     */
+    constructor: function(){
+    },
+    /**
+     * @param radius is the radius in miles or km
+     * @param point center point of the circle
+     * @return polygon typeof esri.geometry.Polygon
+     */
+    create:function(/*int*/radius,/*geometry.Point*/point){
+
+        var circle = this._create(radius,point)
+        return circle;
+
+    },
+    _create:function(/*int*/radius,/*geometry.Point*/point,/*Boolean*/returnMercator){
+
+        var mapPt = null;
+        var polygon = null;
+
+        if(typeof returnMercator != 'undefined')
+        {
+            mapPt = esri.geometry.webMercatorToGeographic(point);
+            polygon = new esri.geometry.Polygon(new esri.SpatialReference({wkid:102100}));
+        }
+        else
+        {
+            mapPt = point;
+            polygon = new esri.geometry.Polygon(new esri.SpatialReference({wkid:4326}))
+        }
+
+        var lon1 = this.degToRad(mapPt.x);
+        var lat1 = this.degToRad(mapPt.y);
+        var R_KM = 6371; //radius km
+        var R_MI = 3963;
+        //var d:Number = radius/R_KM;  	//angular distance on earth's surface
+        var d = radius/R_MI; 	//angular distance on earth's surface
+
+        //var nodes = 100; //number of nodes in circle
+        //var step = 360/nodes||10;
+        var ptArray = [];
+        var n = 0;
+
+        for(var x = 0; x <= 360; x++)
+        {
+            var bearing = this.degToRad(x);
+            var lat2 = Math.asin(
+                    Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(bearing)
+            );
+
+            var lon2 = lon1 + Math.atan2(
+                    Math.sin(bearing) * Math.sin(d) * Math.cos(lat1),
+                    Math.cos(d) - Math.sin(lat1) * Math.sin(lat2)
+            );
+
+            if(returnMercator)
+            {
+                ptArray[x] = esri.geometry.geographicToWebMercator(
+                        new esri.geometry.Point(this.radToDeg(lon2), this.radToDeg(lat2), map.spatialReference)
+                );
+            }
+            else
+            {
+                ptArray[x] = new esri.geometry.Point(this.radToDeg(lon2), this.radToDeg(lat2), new esri.SpatialReference({
+                    wkid: 4326
+                }));
+            }
+        }
+
+        //add first point to the end of array to close the polygon
+        ptArray.push(ptArray[0]);
+        polygon.addRing(ptArray);
+        return polygon;
+    },
+
+    radToDeg:function(/*number*/radians){
+        return radians * 180 / Math.PI;
+    },
+
+    degToRad:function(/*number*/degrees){
+        return degrees * Math.PI /180;
+    }
+});
+
+dojo.ready(init);
+</script>
+</head>
+
+<body>
+<div id="mainView" dojoType="dojox.mobile.View" style="height: 100%;" selected="true">
+    <h1 dojoType="dojox.mobile.Heading" label="Demographic Search">
+        <div dojoType="dojox.mobile.ToolBarButton" label="Income" class="geoResults" style="float: right; padding:0px 14px;" moveTo="statsView"></div>
+        <div dojoType="dojox.mobile.ToolBarButton" label="Map" class="geoResults" style="float:right" moveTo="mapView"></div>
+    </h1>
+    <h2 dojoType="dojox.mobile.RoundRectCategory">Current Address</h2>
+    <div dojoType="dojox.mobile.RoundRect" id="address" shadow="true">Address</div>
+    <div dojoType="dojox.mobile.RoundRect" id="accuracy" shadow="true">Accuracy</div>
+    <h2 id="listSection" dojoType="dojox.mobile.RoundRectCategory"><div id="listSectionMiles">Demographics within 2 miles</div></h2>
+    <ul dojoType="dojox.mobile.RoundRectList">
+        <li id="population" dojoType="dojox.mobile.ListItem">Population</li>
+        <li id="medianAgeMale" dojoType="dojox.mobile.ListItem">Median Age Male</li>
+        <li id="medianAgeFemale" dojoType="dojox.mobile.ListItem">Median Age Female</li>
+        <li id="households" dojoType="dojox.mobile.ListItem">Total HouseHolds</li>
+        <li id="vacant" dojoType="dojox.mobile.ListItem">Vacant Households</li>
+        <li id="owner" dojoType="dojox.mobile.ListItem">Owner Occupied</li>
+        <li id="renter" dojoType="dojox.mobile.ListItem">Renter Occupied</li>
+        <li id="renterOwner" dojoType="dojox.mobile.ListItem">Renter household ratio</li>
+    </ul>
+
+    <ul dojoType="dojox.mobile.EdgeToEdgeList">
+        <li dojoType="dojox.mobile.ListItem" id="settingsItem" moveTo="settingsView" icon="images/gears1.png" iconPos="3,3,32,32" >Settings</li>
+    </ul>
+</div>
+<div id="mapView" dojoType="dojox.mobile.View" style="width:100%;height:100%;">
+    <h1 dojoType="dojox.mobile.Heading" back="Back" moveTo="mainView">5 + 10 minute Drive Times</h1>
+    <div id="map" style="width:100%; height:100%;">
+    </div>
+    <div id="vertical"></div>
+</div>
+<div id="statsView" dojoType="dojox.mobile.View" style="width:100%;height:100%;">
+    <h1 dojoType="dojox.mobile.Heading" back="Back" moveTo="mainView">Household Income</h1>
+
+    <div id="chart1ParentDiv" dojoType="dojox.mobile.RoundRect">
+        <div id="chart1" style="width:100%; height: 350px;"></div>
+    </div>
+    <h2 dojoType="dojox.mobile.RoundRectCategory">Number of households per group</h2>
+    <ul dojoType="dojox.mobile.RoundRectList">
+        <li id="medianIncome" dojoType="dojox.mobile.ListItem">Median Income</li>
+        <li id="zero_twentyfive" dojoType="dojox.mobile.ListItem">Income $0 - $25k</li>
+        <li id="twentyfive_fifty" dojoType="dojox.mobile.ListItem">Income $25 - $50k</li>
+        <li id="fifty_seventyfive" dojoType="dojox.mobile.ListItem">Income $50 - $75k</li>
+        <li id="seventyfive_onehundred" dojoType="dojox.mobile.ListItem">Income $75 - $100k</li>
+        <li id="onehundred_twohundred" dojoType="dojox.mobile.ListItem">Income $100 - $200k</li>
+        <li id="twohundred_fivehundred" dojoType="dojox.mobile.ListItem">Income $200 - $500k</li>
+        <li id="fivehundredplus" dojoType="dojox.mobile.ListItem">Income $500 +</li>
+    </ul>
+</div>
+<div id="settingsView" dojoType="dojox.mobile.View" style="width:100%;height:100%;">
+    <h1 dojoType="dojox.mobile.Heading" back="Home" moveTo="mainView">Settings</h1>
+    <ul dojoType="dojox.mobile.RoundRectList">
+        <li id="distVal" dojoType="dojox.mobile.ListItem" moveTo="distanceView" rightText="2 miles"
+            back="Back">Search Distance</li>
+        <li id="refresh" dojoType="dojox.mobile.ListItem">
+            <div layout="left">
+                <span id="refreshButton" dojoType="dojox.mobile.ToolBarButton" onclick="getHTML5Location('refresh')">Search Again</span>
+            </div>
+        </li>
+    </ul>
+</div>
+<div id="distanceView" dojoType="dojox.mobile.View">
+    <h1 dojoType="dojox.mobile.Heading" back="Settings" moveTo="settingsView">Search Distance</h1>
+    <ul dojoType="dojox.mobile.EdgeToEdgeList" id="searchDistList">
+        <li dojoType="dojox.mobile.ListItem" btnClass="mblCheckOnButton" onClick="updateDistance(this);">2 miles</li>
+        <li dojoType="dojox.mobile.ListItem" btnClass="mblCheckOffButton"
+            onClick="updateDistance(this);">5 miles</li>
+        <li dojoType="dojox.mobile.ListItem" btnClass="mblCheckOffButton"
+            onClick="updateDistance(this);">10 miles</li>
+    </ul>
+</div>
+</body>
+
+</html>
